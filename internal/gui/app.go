@@ -446,6 +446,7 @@ func Run(version string, showMain bool, link string) error {
 		// so do the threads.
 		OnShutdown: func() {
 			unhookNoActivate()
+			stopEfficiencyMode()
 			stopServing()
 			proc.EndProbes()
 			if handedOver.Load() {
@@ -734,6 +735,7 @@ func Run(version string, showMain bool, link string) error {
 	if runtime.GOOS == "windows" {
 		h.main.OnWindowEvent(events.Windows.WebViewNavigationCompleted, func(*application.WindowEvent) { markReady() })
 		h.mendOnWake()
+		h.startEfficiencyMode()
 	} else {
 		h.app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) {
 			if runtime.GOOS != "darwin" {
@@ -803,6 +805,7 @@ func Run(version string, showMain bool, link string) error {
 		startAppPage(h, gw)
 	}
 	defer unhookNoActivate()
+	defer stopEfficiencyMode()
 	return h.app.Run()
 }
 

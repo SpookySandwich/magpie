@@ -534,6 +534,8 @@ var live = struct {
 	hosts map[*host]bool
 	// ended is set by EndHosts: no host starts after it
 	ended bool
+	// efficient puts running and newly started hosts in Windows' EcoQoS
+	efficient bool
 }{hosts: map[*host]bool{}}
 
 // errHostsEnded is a host asked for once EndHosts has run.
@@ -1154,6 +1156,9 @@ func startOn(ctx context.Context, bun string) (*host, bool, error) {
 	if err != nil {
 		live.Unlock()
 		return nil, false, err
+	}
+	if live.efficient {
+		tree.SetEfficiencyMode(true)
 	}
 	hctx, hcancel := context.WithCancel(context.Background())
 	h := &host{
