@@ -44,6 +44,9 @@ import (
 // Site is magpie's home; its /api/latest is the update feed.
 const Site = "https://usemagpie.ai"
 
+// siteFeed is the default feed; a var for tests.
+var siteFeed = "https://github.com/SpookySandwich/magpie/releases/latest/download/latest.json"
+
 // Feed is where the newest release is described. MAGPIE_UPDATE_FEED points
 // it elsewhere, for testing an update against a local server.
 func Feed() string {

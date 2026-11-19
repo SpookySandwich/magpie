@@ -122,11 +122,19 @@ type errUnknown struct{ err error }
 func (e errUnknown) Error() string { return e.err.Error() }
 func (e errUnknown) Unwrap() error { return e.err }
 
+// customForkAsset reports whether a comes from the custom fork's releases,
+// which are authenticated by CUSTOM_UPDATE_SIGNING_KEY rather than attested in
+// yetone/magpie-releases.
+func customForkAsset(a Asset) bool {
+	const path = "/SpookySandwich/magpie/releases/"
+	return strings.Contains(a.URL, path) || strings.Contains(a.GitHub, path)
+}
+
 // attestedFile checks the attestation of the file whose signed SHA-256 is
 // a.SHA256. It returns nil when the file is attested, or when that is
 // unknown (said in the log), and an error that stops the install otherwise.
 func attestedFile(ctx context.Context, a Asset, name string) error {
-	if !a.attest {
+	if !a.attest || customForkAsset(a) {
 		return nil
 	}
 	err := attestation(ctx, a)

@@ -1,0 +1,236 @@
+name: Custom Release
+
+on:
+  push:
+    branches:
+      - custom
+  workflow_dispatch:
+    inputs:
+      sync_upstream:
+        description: 'Merge latest yetone/magpie:main into custom before building'
+        required: false
+        type: boolean
+        default: false
+  schedule:
+    - cron: '17 9 * * *'
+
+concurrency:
+  group: custom-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Publish Custom Windows Release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout custom branch
+        uses: actions/checkout@v4
+        with:
+          ref: custom
+          fetch-depth: 0
+
+      - name: Sync upstream yetone/magpie:main (daily schedule or requested)
+        id: sync
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "merged=false" >> "$GITHUB_OUTPUT"
+
+          if [[ "${{ github.event_name }}" != "schedule" && "${{ inputs.sync_upstream }}" != "true" ]]; then
+            exit 0
+          fi
+
+          git config user.name "SpookySandwich"
+          git config user.email "210268775+SpookySandwich@users.noreply.github.com"
+          git fetch https://github.com/yetone/magpie.git main
+
+          if git merge-base --is-ancestor FETCH_HEAD HEAD; then
+            echo "custom already includes latest yetone/magpie:main ($(git rev-parse --short FETCH_HEAD))."
+            if [[ "${{ github.event_name }}" == "schedule" ]]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+            fi
+            exit 0
+          fi
+
+          if git merge --no-edit FETCH_HEAD -m "Merge upstream yetone/magpie:main into custom"; then
+            echo "Cleanly merged upstream yetone/magpie:main ($(git rev-parse --short FETCH_HEAD)) into custom."
+            echo "merged=true" >> "$GITHUB_OUTPUT"
+          else
+            git merge --abort || true
+            echo "::warning::Upstream yetone/magpie:main conflicts with custom; skipping auto-merge."
+            if [[ "${{ github.event_name }}" == "schedule" ]]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            exit 1
+          fi
+
+      - name: Set up Go
+        if: steps.sync.outputs.skip != 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run update and PII tests
+        if: steps.sync.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bad=$(gofmt -l internal/update build/customrelease)
+          if [[ -n "$bad" ]]; then
+            echo "not gofmt'd:"
+            echo "$bad"
+            exit 1
+          fi
+          CGO_ENABLED=0 go test -tags nogui ./build/customrelease/... ./internal/update/... ./internal/pii/...
+
+      - name: Compute release version
+        if: steps.sync.outputs.skip != 'true'
+        id: ver
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          commit_count=$(git rev-list --count HEAD)
+          patch=$commit_count
+
+          upstream_tag=$(gh api repos/yetone/magpie-releases/releases/latest -q .tag_name 2>/dev/null || true)
+          if [[ "$upstream_tag" =~ ^v?0\.1\.([0-9]+) ]]; then
+            up_next=$(( ${BASH_REMATCH[1]} + 1 ))
+            if (( up_next > patch )); then
+              patch=$up_next
+            fi
+          fi
+
+          custom_tag=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" -q .tag_name 2>/dev/null || true)
+          if [[ "$custom_tag" =~ ^v?0\.1\.([0-9]+) ]]; then
+            cust_next=$(( ${BASH_REMATCH[1]} + 1 ))
+            if (( cust_next > patch )); then
+              patch=$cust_next
+            fi
+          fi
+
+          version="0.1.$patch"
+          tag="v$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "prev_tag=$custom_tag" >> "$GITHUB_OUTPUT"
+          echo "Computed custom release version: $version ($tag)"
+
+      - name: Build Windows amd64 binaries (GUI + CLI + companion launcher)
+        if: steps.sync.outputs.skip != 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          rm -rf dist rsrc_windows_*.syso internal/update/launcher-*.com internal/gui/assets.zip
+          mkdir -p dist
+
+          go run ./build/assetpack internal/gui/assets internal/gui/assets.zip
+          go run ./build/conpty
+          go run github.com/tc-hib/go-winres@v0.3.3 make \
+            --in build/windows/winres.json \
+            --arch amd64 \
+            --out rsrc \
+            --file-version "$VERSION" \
+            --product-version "$VERSION"
+
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
+            -trimpath -buildvcs=false -ldflags="-s -w" \
+            -o internal/update/launcher-amd64.com ./internal/update/launcher
+
+          go run ./build/customrelease com \
+            internal/update/launcher-amd64.com magpie.exe dist/magpie.com
+
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
+            -tags production,comlauncher,packedassets,conptypair \
+            -trimpath -ldflags="-s -w -X main.version=$VERSION -H windowsgui" \
+            -o dist/magpie-windows-amd64.exe .
+
+          rm -f rsrc_windows_*.syso internal/update/launcher-*.com
+
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
+            -tags "nogui packedassets conptypair" \
+            -trimpath -ldflags="-s -w -X main.version=$VERSION" \
+            -o dist/magpie-cli-windows-amd64.exe .
+
+          ls -lh dist/
+
+      - name: Sign SHA256SUMS and generate latest.json
+        if: steps.sync.outputs.skip != 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          PREV_TAG: ${{ steps.ver.outputs.prev_tag }}
+          CUSTOM_UPDATE_SIGNING_KEY: ${{ secrets.CUSTOM_UPDATE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          head_sha=$(git rev-parse --short HEAD)
+          {
+            echo "## Custom Fork Build ($TAG)"
+            echo ""
+            echo "- **Commit:** \`$head_sha\` on \`custom\`"
+            echo "- **Included custom optimizations:**"
+            echo "  - Intel NPU Level Zero acceleration for AstrLink Guard on Windows"
+            echo "  - Append-only delta log & bounded compaction for PII span cache"
+            echo "  - Windows Efficiency Mode (EcoQoS) on battery / Energy Saver"
+            echo ""
+            echo "### Recent Changes"
+            echo ""
+            if [[ -n "$PREV_TAG" ]] && git rev-parse "$PREV_TAG" >/dev/null 2>&1; then
+              git log --no-merges --format="- %s (\`%h\`)" "$PREV_TAG..HEAD" | head -n 40
+            else
+              git log --no-merges --format="- %s (\`%h\`)" -n 15 HEAD
+            fi
+          } > notes.md
+
+          go run ./build/customrelease manifest \
+            --version "$VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pub "KJmIgtWwQQNRasOu5+9HRFKTJlBbosRD/1/Xhx7qKKE=" \
+            --notes notes.md \
+            --dir dist
+
+          cat dist/SHA256SUMS
+          jq '{version, url, assets: (.assets | keys), signed: (.signed != null)}' dist/latest.json
+
+      - name: Push synced custom branch and publish GitHub Release
+        if: steps.sync.outputs.skip != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ steps.sync.outputs.merged }}" == "true" ]]; then
+            git push origin HEAD:refs/heads/custom
+          fi
+
+          target_sha=$(git rev-parse HEAD)
+          gh release create "$TAG" dist/* \
+            -R "$GITHUB_REPOSITORY" \
+            --target "$target_sha" \
+            --title "magpie $TAG (custom)" \
+            --notes-file notes.md \
+            --latest
+
+          for try in 1 2 3 4 5; do
+            got_ver=$(curl -fsSL "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/latest.json" | jq -r .version || true)
+            if [[ "$got_ver" == "$VERSION" ]]; then
+              echo "Verified latest.json serves version $got_ver"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "::error::latest.json did not resolve to $VERSION"
+          exit 1

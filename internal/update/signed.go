@@ -28,7 +28,7 @@ import (
 
 // signingKey is the public half (base64, raw 32 bytes) of the release
 // signing key. A var for tests.
-var signingKey = "3XuYQEohIRDF+zxGQry1iXGZ1cfKYFX3vsST6GSSbYQ="
+var signingKey = "KJmIgtWwQQNRasOu5+9HRFKTJlBbosRD/1/Xhx7qKKE="
 
 // firstSigned is the first release published with a SHA256SUMS.sig.
 const firstSigned = "0.1.3862"
@@ -95,7 +95,7 @@ func (rel *Release) verify() error {
 			return fmt.Errorf("release %s: the feed's checksum for %s is not the signed one; not installed", rel.Version, name)
 		}
 		a.SHA256 = want
-		a.attest = !Newer(firstAttested, rel.Version)
+		a.attest = !Newer(firstAttested, rel.Version) && !customForkAsset(a)
 		rel.Assets[name] = a
 	}
 	return nil

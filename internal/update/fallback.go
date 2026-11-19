@@ -30,15 +30,12 @@ import (
 // GitHub can't give: on Stable a failed feed stays a failed feed.
 
 // releaseRepo is where releases are published.
-const releaseRepo = "yetone/magpie-releases"
+const releaseRepo = "SpookySandwich/magpie"
 
 // feedWait is how long the feed has to answer when GitHub stands behind
 // it: a network that drops usemagpie.ai's packets would otherwise hold
 // the check for the client's ten minutes. A var for tests.
 var feedWait = 20 * time.Second
-
-// siteFeed is the default feed; a var for tests.
-var siteFeed = Site + "/api/latest"
 
 // maxSmall bounds SHA256SUMS and its signature.
 const maxSmall = 1 << 20
