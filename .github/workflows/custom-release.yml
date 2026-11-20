@@ -36,6 +36,8 @@ jobs:
 
       - name: Sync upstream yetone/magpie:main (daily schedule or requested)
         id: sync
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
@@ -53,7 +55,12 @@ jobs:
           if git merge-base --is-ancestor FETCH_HEAD HEAD; then
             echo "custom already includes latest yetone/magpie:main ($(git rev-parse --short FETCH_HEAD))."
             if [[ "${{ github.event_name }}" == "schedule" ]]; then
-              echo "skip=true" >> "$GITHUB_OUTPUT"
+              published=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
+              if [[ "$(git rev-parse "$published^{commit}")" == "$(git rev-parse HEAD)" ]]; then
+                echo "skip=true" >> "$GITHUB_OUTPUT"
+              else
+                echo "Published $published trails custom; building the current head."
+              fi
             fi
             exit 0
           fi
@@ -62,12 +69,9 @@ jobs:
             echo "Cleanly merged upstream yetone/magpie:main ($(git rev-parse --short FETCH_HEAD)) into custom."
             echo "merged=true" >> "$GITHUB_OUTPUT"
           else
-            git merge --abort || true
-            echo "::warning::Upstream yetone/magpie:main conflicts with custom; skipping auto-merge."
-            if [[ "${{ github.event_name }}" == "schedule" ]]; then
-              echo "skip=true" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
+            git diff --name-only --diff-filter=U
+            git merge --abort
+            echo "::error::Upstream yetone/magpie:main conflicts with custom. Resolve the merge before publishing."
             exit 1
           fi
 
@@ -187,7 +191,7 @@ jobs:
             echo "### Recent Changes"
             echo ""
             if [[ -n "$PREV_TAG" ]] && git rev-parse "$PREV_TAG" >/dev/null 2>&1; then
-              git log --no-merges --format="- %s (\`%h\`)" "$PREV_TAG..HEAD" | head -n 40
+              git log -n 40 --no-merges --format="- %s (\`%h\`)" "$PREV_TAG..HEAD"
             else
               git log --no-merges --format="- %s (\`%h\`)" -n 15 HEAD
             fi
