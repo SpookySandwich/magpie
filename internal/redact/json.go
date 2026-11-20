@@ -33,7 +33,7 @@ var kept = map[string]bool{
 // the rest is read by the vendor as structure, and a word masked inside a
 // Lark grammar's rule name ("pd" in update_hunk) left a grammar the vendor
 // turned away with 400 "Invalid lark grammar" (#1911).
-func keepIn(path, key, s string, args, defs []string) bool {
+func keepIn(path, key, s string, args, defs objectPaths) bool {
 	if strings.HasPrefix(s, "data:") {
 		return true
 	}
@@ -69,7 +69,7 @@ var signatureKeys = []string{"signature", "thoughtSignature", "thought_signature
 // response, the structured result the tool gave; nothing in them counts
 // as sealed. defs are what the agent defines for the vendor rather than
 // says to the model (definitions).
-func scan(body []byte) (signed, args, defs []string) {
+func scan(body []byte) (signed, args, defs objectPaths) {
 	found := false
 	for _, k := range append(signatureKeys, "functionCall", "function_call", "functionResponse", "function_response", "arguments") {
 		found = found || bytes.Contains(body, []byte(`"`+k+`"`))
@@ -93,13 +93,13 @@ func scan(body []byte) (signed, args, defs []string) {
 		switch x := v.(type) {
 		case map[string]any:
 			if sealed(x) {
-				signed = append(signed, path)
+				signed.add(path)
 				return
 			}
 			t, _ := x["type"].(string)
 			for k, c := range x {
 				if toolArgs(t, key, k) || k == "response" && (key == "functionResponse" || key == "function_response") {
-					args = append(args, join(path, k))
+					args.add(join(path, k))
 					continue
 				}
 				visit(join(path, k), k, c)
@@ -163,12 +163,12 @@ var defItems = map[string]bool{"additional_tools": true, "tool_search_output": t
 // defItems. Only where they sit in the protocol counts: a "tools" or
 // "text" key deeper in, in a message or a tool call's arguments, is what
 // the agent or the model wrote.
-func definitions(v any) []string {
+func definitions(v any) objectPaths {
 	m, _ := v.(map[string]any)
 	if m == nil {
 		return nil
 	}
-	var defs []string
+	var defs objectPaths
 	for _, k := range defKeys {
 		if _, ok := m[k]; !ok {
 			continue
@@ -180,13 +180,13 @@ func definitions(v any) []string {
 				continue
 			}
 		}
-		defs = append(defs, k)
+		defs.add(k)
 	}
 	items, _ := m["input"].([]any)
 	for i, it := range items {
 		if im, _ := it.(map[string]any); im != nil {
 			if t, _ := im["type"].(string); defItems[t] {
-				defs = append(defs, join(join("input", strconv.Itoa(i)), "tools"))
+				defs.add(join(join("input", strconv.Itoa(i)), "tools"))
 			}
 		}
 	}
@@ -211,14 +211,34 @@ func sealed(x map[string]any) bool {
 	return false
 }
 
-// under says path is in one of the objects at roots.
-func under(path string, roots []string) bool {
-	for _, r := range roots {
-		if r == "" || path == r || strings.HasPrefix(path, r+".") {
+// objectPaths holds the same dotted paths the walker visits, for one request.
+type objectPaths map[string]struct{}
+
+func (r *objectPaths) add(path string) {
+	if *r == nil {
+		*r = make(objectPaths)
+	}
+	(*r)[path] = struct{}{}
+}
+
+// under checks the path and its dot-delimited ancestors, including the root.
+func under(path string, roots objectPaths) bool {
+	if len(roots) == 0 {
+		return false
+	}
+	if _, ok := roots[""]; ok {
+		return true
+	}
+	for {
+		if _, ok := roots[path]; ok {
 			return true
 		}
+		i := strings.LastIndexByte(path, '.')
+		if i < 0 {
+			return false
+		}
+		path = path[:i]
 	}
-	return false
 }
 
 // walk calls fn with every string value in the JSON document b — its path
