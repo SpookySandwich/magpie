@@ -351,7 +351,7 @@ type readingSet struct {
 }
 
 // claim leaves out of units those another request reads now, and
-// claims the first chunk of the rest for this one: the rest's chunks and
+// claims the first chunk of the rest for this one: that chunk and its
 // parts (joinAt, at size), what is closed when a read of one left out
 // ends (nil when none was), and release, which ends this one's claim
 // once what it found is in the cache.
@@ -359,6 +359,7 @@ func (r *readingSet) claim(units []string, size int) (chunks []string, parts [][
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var rest []string
+	used := 0
 	for _, u := range units {
 		if c, ok := r.m[sha256.Sum256([]byte(u))]; ok {
 			if wait == nil {
@@ -366,6 +367,13 @@ func (r *readingSet) claim(units []string, size int) (chunks []string, parts [][
 			}
 			continue
 		}
+		if len(rest) > 0 {
+			used += len(sep)
+			if used+len(u) > size {
+				break
+			}
+		}
+		used += len(u)
 		rest = append(rest, u)
 	}
 	chunks, parts = joinAt(rest, size)
@@ -848,22 +856,24 @@ func join(texts []string) (chunks []string, parts [][]part) { return joinAt(text
 
 // joinAt is join, its chunks up to size.
 func joinAt(texts []string, size int) (chunks []string, parts [][]part) {
-	cur, curParts := "", []part(nil)
+	var cur strings.Builder
+	var curParts []part
 	flush := func() {
 		if curParts != nil {
-			chunks, parts = append(chunks, cur), append(parts, curParts)
-			cur, curParts = "", nil
+			chunks, parts = append(chunks, cur.String()), append(parts, curParts)
+			cur.Reset()
+			curParts = nil
 		}
 	}
 	for _, t := range texts {
-		if curParts != nil && len(cur)+len(sep)+len(t) > size {
+		if curParts != nil && cur.Len()+len(sep)+len(t) > size {
 			flush()
 		}
 		if curParts != nil {
-			cur += sep
+			cur.WriteString(sep)
 		}
-		curParts = append(curParts, part{t, len(cur)})
-		cur += t
+		curParts = append(curParts, part{t, cur.Len()})
+		cur.WriteString(t)
 	}
 	flush()
 	return chunks, parts
