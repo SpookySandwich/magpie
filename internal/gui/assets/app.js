@@ -7620,9 +7620,19 @@ function markNewPartners() {
 let newPartnerTiles = null;
 const newPartnerDotsIn = new Set();
 
-// a partner's row: its own section says it is sponsored, so no badge
+// a partner's row: its own section says it is sponsored, so no badge; its
+// tagline goes on a quiet line under the name, where it is read, not only
+// in the title (yetone: 上 A 方案)
 function partnerTile(pr) {
   const b = tile({ ...pr, sponsored: false, note: "" });
+  const note = partnerNote(pr);
+  if (note) {
+    const n = b.querySelector(".nm .n");
+    const col = el("span", "col");
+    n.replaceWith(col);
+    col.append(n, el("span", "sub", note));
+    b.classList.add("two");
+  }
   if (!pr.added) {
     const open = b.onclick;
     b.onclick = (e) => { newPartnerTiles?.delete(pr.id); countPartner("opened", [pr.id]); open(e); };
@@ -10294,6 +10304,12 @@ function drawEditor(p, presetID) {
       seg.append(b);
     }
     accessAt(cur);
+    // the key was taken at another region than the one picked (a test's
+    // result.region): the editor moves there, for Save to keep
+    draft.onKeyRegion = (id) => {
+      const b = seg.querySelectorAll(".opt")[pr.regions.findIndex((r) => r.id === id)];
+      if (b && !b.classList.contains("on")) { b.click(); status(t("The key is {region}'s: moved there. Save to keep it.", { region: b.textContent })); }
+    };
     queueMicrotask(() => {
       slide(seg, "regions");
       // the region in use in view, where they scroll
@@ -11154,6 +11170,16 @@ function renderEndpoints(p, src) {
         for (const x of r.results) {
           const s = slots[x.protocol];
           if (!s) continue;
+          s.nextElementSibling?.classList.contains("copy") && s.nextElementSibling.remove();
+          if (x.unserved) {
+            // the vendor serves this key nothing on this API (sub2api's
+            // "This group does not allow /v1/messages dispatch"): no fault
+            // of the key, whose models go by its other APIs
+            s.className = "res";
+            s.replaceChildren(el("span", "", t("Not served for this key")));
+            s.title = x.error;
+            continue;
+          }
           s.className = "res " + (x.ok ? "ok" : "bad");
           s.replaceChildren();
           s.append(svg(x.ok ? CHECK : "M4.5 4.5l7 7M11.5 4.5l-7 7", 10, 2));
@@ -11449,6 +11475,7 @@ async function provTest(id, body) {
   try {
     const r = await api("provider/test", { ...body, id, run }, null, ac.signal);
     if (editing === id && r?.results?.some((x) => x.v1)) draft?.onV1?.(r.results);
+    if (editing === id) draft?.onKeyRegion?.(r?.results?.find((x) => x.region)?.region);
     return r;
   }
   catch (e) { e.stopped = ac.signal.aborted; throw e; }
@@ -15230,7 +15257,7 @@ function renderKeyAccounts(p) {
     // one the gateway passes over after a failure: why, and until when, on
     // a line of its own under the key's, so the row's controls stay in reach
     let restLine = null;
-    if (k.rest && new Date(k.rest.until) > Date.now()) {
+    if (restShown(k.rest)) {
       restLine = restLineOf(k.rest, "", t("The gateway passes this key over until then, and tries the next one"), k.name || k.masked, () => { k.rest = null; });
       row.classList.add("resting");
     }
@@ -15408,7 +15435,7 @@ function keyFold(p) {
 function keyMatches(k, q) {
   const words = String(q || "").toLowerCase().split(/\s+/).filter(Boolean);
   if (!words.length) return true;
-  const resting = k.rest && new Date(k.rest.until) > Date.now();
+  const resting = k.rest && !k.rest.notice && new Date(k.rest.until) > Date.now();
   const text = [k.name, k.masked, k.on ? "" : "off " + t("turned off"),
     resting ? "resting " + t("resting") + " " + keyFail(k.rest) + " " + t(keyFail(k.rest)) + " " + (k.rest.status || "") : ""].join(" ").toLowerCase();
   return words.every((w) => text.includes(w));
@@ -15416,7 +15443,7 @@ function keyMatches(k, q) {
 // keyDead: a key the gateway is passing over for good reason, not a rate
 // limit that ends by itself: its sign-in refused, or its credit gone
 function keyDead(k) {
-  return !!k.rest && (k.rest.why === "auth" || k.rest.why === "credit") && new Date(k.rest.until) > Date.now();
+  return !!k.rest && !k.rest.notice && (k.rest.why === "auth" || k.rest.why === "credit") && new Date(k.rest.until) > Date.now();
 }
 // keyFoldRows: under the rows a folded list shows, All N keys; opened,
 // above them the filter and removing many at once, and under them how many
@@ -15496,11 +15523,18 @@ function splitKeys(text) {
   }
   return out;
 }
-// a rest's line: why, till when, the vendor's words, Try now (#1869)
+// restShown: a rest in force, or a rate limit or quota whose rest ended
+// before the limit did (r.notice, gateway.LimitNotice, @eachg0 on X):
+// shown till the time the vendor named, or, with none, till the gateway
+// drops it once the account or key answers again
+const restShown = (r) => !!r && (r.notice && !(Date.parse(r.until) > 0) || new Date(r.until) > Date.now());
+// a rest's line: why, till when, the vendor's words, Try now (#1869). A
+// notice says when the limit resets, or since when, and has no Try now:
+// nothing rests
 function restLineOf(r, model, title, name, lifted) {
-  const why = (r.status ? r.status + " " : "") + t(keyFail(r)), time = restBack(r.until);
-  const s = el("span", "key-rest", (model ? t("{model} resting · {why} · back at {time}", { model, why, time }) : t("Resting · {why} · back at {time}", { why, time })) + (r.probed ? " · " + t("checked in the background, back as soon as it answers") : ""));
-  s.title = title;
+  const e = Date.parse(r.until) > 0, why = (r.status ? r.status + " " : "") + t(keyFail(r)), time = restBack(r.notice && !e ? r.at : r.until);
+  const s = el("span", "key-rest", r.notice ? (model ? model + " " : "") + t(e ? "{why} · resets at {time}" : "{why} since {time}", { why, time }) : (model ? t("{model} resting · {why} · back at {time}", { model, why, time }) : t("Resting · {why} · back at {time}", { why, time })) + (r.probed ? " · " + t("checked in the background, back as soon as it answers") : ""));
+  s.title = r.notice ? t(e ? "The gateway asks it again; this shows until the limit resets" : "The gateway asks it again; this shows until a request on it is answered") : title;
   const go = el("button", "text key-unrest", t("Try now"));
   go.title = t("Ends the rest: the next request asks it again. Refused again, it rests again.");
   go.onclick = async (e) => {
@@ -15516,13 +15550,13 @@ function restLineOf(r, model, title, name, lifted) {
   const line = el("div", "key-rest-line");
   line.append(s);
   if (r.error) line.append(Object.assign(el("span", "key-rest-said", r.error), { title: r.error }));
-  line.append(go);
+  if (!r.notice) line.append(go);
   return line;
 }
 
 const accountRestLines = (p, user) => {
   const u = String(user).toLowerCase(), rs = p.accountRests?.[u] || [];
-  return rs.filter((r) => new Date(r.until) > Date.now()).map((r) => restLineOf(r, r.model, r.model ? t("Until then {model} goes to another account; its other models are used as before", { model: r.model }) : t("The gateway passes this account over until then, and tries the next one"), r.model ? r.model + " · " + user : user, () => p.accountRests[u] = rs.filter((x) => x !== r)));
+  return rs.filter(restShown).map((r) => restLineOf(r, r.model, r.model ? t("Until then {model} goes to another account; its other models are used as before", { model: r.model }) : t("The gateway passes this account over until then, and tries the next one"), r.model ? r.model + " · " + user : user, () => p.accountRests[u] = rs.filter((x) => x !== r)));
 };
 
 // a key's rest, worded as the Routing page words a failure
@@ -15899,7 +15933,9 @@ async function providerAction(action, body, okMsg, base = "provider/") {
     renderProviders();
     state = await api("state");
     renderAgents();
-    saidMoved(okMsg);
+    // a provider saved at the region its key is of (providers.placed, the
+    // region's name): Sidrune AI's China key typed in at Global
+    saidMoved(providers.placed ? t("Saved at {region}: the key is that region's", { region: t(providers.placed) }) : okMsg);
     return true;
   } catch (e) {
     // a Remove may have gone through before what failed: the list as it is
