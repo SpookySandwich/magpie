@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"runtime/metrics"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -137,12 +138,17 @@ func TestHubCodeErrors(t *testing.T) {
 		`return (`:                                                      "doesn't parse",
 		`return await tools.gh__search_issues({})`:                      "github__search_issues",
 		`return await tools.nothing__here({})`:                          "no tool is called nothing__here",
+		`return await tools.x__fetch({})`:                               "no tool is called x__fetch",
 		`tools.github__search_issues({}); return new Promise(() => {})`: "never settled",
 	} {
 		got := run(code)
 		if !got.Result.IsError || !strings.Contains(codeText(got), want) {
 			t.Fatalf("%s gave %+v, want %q", code, got, want)
 		}
+	}
+	// the agent's own names for a tool (Alma's, Claude Code's) reach it
+	if got := run(`return [await tools["magpie__github_search_issues"]({}), await tools["mcp__magpie__github__search_issues"]({})].join()`); got.Result.IsError || codeText(got) != "ok,ok" {
+		t.Fatalf("the agent's names: %+v", got)
 	}
 	if got := run(`return await tools.github__get_issue({})`); !strings.Contains(codeText(got), "Not Found") {
 		t.Fatalf("the tool's own words: %s", codeText(got))
@@ -241,4 +247,46 @@ func TestHubCodeOff(t *testing.T) {
 	if got := run(`return 1`); got.Error == nil {
 		t.Fatalf("ran: %+v", got)
 	}
+}
+
+// A builtin is Go, past goja's interrupt: one that allocates gigabytes at
+// once, or a regular expression that backtracks for ever, is ended with
+// the script's process at its memory or its time, and takes neither
+// magpie's memory nor the request with it.
+func TestHubCodeBuiltinsEndWithTheirProcess(t *testing.T) {
+	was := hubCodeWait
+	hubCodeWait = 2 * time.Second
+	t.Cleanup(func() { hubCodeWait = was })
+	_, run := codeHub(t, nil)
+	for _, c := range []struct{ code, want string }{
+		{`return "x".repeat(3e9).length`, "memory"},
+		{`return /^(a+)+$(?!x)/.test("a".repeat(40) + "b")`, "didn't finish"},
+		{`const a = []; a.length = 4e9; return a.indexOf(1)`, "didn't finish"},
+	} {
+		code, want := c.code, c.want
+		before := hubHeapNow()
+		start := time.Now()
+		got := make(chan mcpReply, 1)
+		go func() { got <- run(code) }()
+		select {
+		case m := <-got:
+			if !m.Result.IsError || !strings.Contains(codeText(m), want) {
+				t.Fatalf("%s gave %q, want %q", code, codeText(m), want)
+			}
+		case <-time.After(20 * time.Second):
+			t.Fatalf("%s still running after %s", code, time.Since(start))
+		}
+		if took := time.Since(start); took > 10*time.Second {
+			t.Fatalf("%s took %s", code, took)
+		}
+		if grew := int64(hubHeapNow()) - int64(before); grew > 256<<20 {
+			t.Fatalf("%s grew magpie's heap by %d MB", code, grew>>20)
+		}
+	}
+}
+
+func hubHeapNow() uint64 {
+	s := []metrics.Sample{{Name: "/memory/classes/heap/objects:bytes"}}
+	metrics.Read(s)
+	return s[0].Value.Uint64()
 }

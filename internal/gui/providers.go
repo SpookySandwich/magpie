@@ -21,6 +21,7 @@ import (
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/autostart"
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/egress"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/library"
 	"github.com/yetone/magpie/internal/plugin"
@@ -541,6 +542,10 @@ type providerJSON struct {
 	// chooses that isn't on this computer: its requests fail until another
 	// is picked, as a missing proxy never means a direct connection.
 	ProxyGone string `json:"proxyGone,omitempty"`
+	// Egress is where the Claude subscription's accounts' way out to the
+	// internet is (internal/egress): the worst of their proxies' lookups,
+	// set on the Claude row when it has accounts.
+	Egress *egress.Result `json:"egress,omitempty"`
 	// a subscription account's rests in force, by its user in lower case:
 	// its own and each of its models' (maxleebeta on Discord: WorkBuddy's
 	// 429 "将在 … 重置" rested a model, credits left, and nothing here said so)
@@ -870,9 +875,9 @@ type providersJSON struct {
 	// Unmoved are the retired built-ins whose accounts haven't moved onto
 	// their plugins yet, served by nothing until they do, with why
 	Unmoved []provider.MoveCandidate `json:"unmoved,omitempty"`
-	// Withdrawn are the plugins this magpie still has that magpie gives
+	// Withdrawn are the plugins this magpie still has on that magpie gives
 	// to nobody new, for the page to say the risk and what to use instead
-	Withdrawn []plugin.Withdrawal `json:"withdrawn,omitempty"`
+	Withdrawn []withdrawnJSON `json:"withdrawn,omitempty"`
 	// AgyMove are the withdrawn Antigravity plugin's accounts (by email)
 	// that Antigravity (local agy CLI) can take as they are, which it
 	// doesn't have yet (provider.MoveToAgy), and AgyMoved what moving
@@ -1097,6 +1102,12 @@ func providerInfoWith(p provider.Provider, ls provider.Listing, agents []agentUs
 	out.Key.Set = p.Key != ""
 	out.Key.Masked = provider.Mask(p.Key)
 	out.ProxyGone = provider.ProxyGone(p)
+	if p.ID == "claude" {
+		if cs := provider.ClaudeProxies(); len(cs) > 0 {
+			r := egress.Worst(cs)
+			out.Egress = &r
+		}
+	}
 	if provider.BuiltinRetired(p.ID) {
 		// only its plugin's row is listed now: built-in accounts not moved
 		// yet are providersJSON.Unmoved's
@@ -1572,7 +1583,7 @@ func providersState() providersJSON {
 			s.Unmoved = append(s.Unmoved, c)
 		}
 	}
-	s.Withdrawn = plugin.WithdrawnKept()
+	s.Withdrawn = withdrawnLines()
 	if err := provider.FileError(); err != nil {
 		s.FileError = err.Error()
 	}
@@ -4189,4 +4200,30 @@ func fetchedCount(p provider.Provider, ids int) int {
 		return n
 	}
 	return ids
+}
+
+// withdrawnJSON is a withdrawn plugin the page names. Beside is set when
+// the plugin to use instead is on and signed in with every account the
+// withdrawn one has: nothing is left to move, so the page offers to turn
+// the withdrawn one off rather than to use what is in use already (a
+// user signed in to agy-cli was still told to use it).
+type withdrawnJSON struct {
+	plugin.Withdrawal
+	Beside bool `json:"beside,omitempty"`
+}
+
+// withdrawnLines are the withdrawn plugins still on. One turned off
+// sends nothing anywhere, so it gets no line.
+func withdrawnLines() []withdrawnJSON {
+	list := plugin.Load().Plugins
+	var out []withdrawnJSON
+	for _, w := range plugin.WithdrawnKept() {
+		if w.Off {
+			continue
+		}
+		// the plugin to use instead (w.Package), on
+		insteadOn := slices.ContainsFunc(list, func(e plugin.Entry) bool { return !e.Off && plugin.PackageName(e.Spec) == w.Package })
+		out = append(out, withdrawnJSON{Withdrawal: w, Beside: insteadOn && w.ID == "antigravity" && provider.AgyHasEvery()})
+	}
+	return out
 }

@@ -1601,7 +1601,11 @@ per middleware; `{skip: true}` passes the account over for that request),
 event of a streamed reply and `onResponse(body, ctx)` a whole one, all in
 the agent's own API. A hook returns the changed object, or nothing to
 leave it; `onEvent` returns `null` to drop an event, and
-`ctx.reject(status, message)` turns a request away. Declare it with
+`ctx.reject(status, message)` turns a request away. `ctx.caller` is
+the agent the request came from, `{agent, name, via}`, through any magpies
+that passed it on (as a plugin's `chat.headers` gets `input.caller`), so
+`onRequest` can refuse an agent before any provider is asked; the async
+request hooks get it too. Declare it with
 `"magpie": { "middleware": "./mw.js" }` in `package.json`, or add a single
 `*.middleware.js` file:
 
@@ -2813,6 +2817,18 @@ ASCII, so an account named in other letters (`北冥`) is sent percent-encoded
 (`X-Magpie-Account: %E5%8C%97%E5%86%A5`, JavaScript's `encodeURIComponent`);
 magpie decodes it, and a value that isn't such an encoding is the name as
 written.
+
+`GET /v1/magpie/accounts` lists the accounts and API keys of every
+provider, those whose vendor tells no quota included, by identifiers only:
+`provider`, `id` (a signed-in account's login id, a key's fingerprint,
+never the key), `kind` (`account` or `key`), `label`, `user`, `plan`, `on`
+and `pin`, `"<provider>/<id>"`. `?provider=<id>` lists one provider's.
+`X-Magpie-Account: <pin>` (or the id alone) pins a request to that
+account or key. It is asked as `/v1/magpie/quotas` is: this machine, or
+another with a key of a gateway shared on the local network; a read-only
+key may read it, and a key held to a budget, models or accounts only when
+its owner lets it be told quotas, and then only of the accounts it may
+use.
 
 A status bar can show where a turn went before its first token arrives:
 send `X-Magpie-Session: <id>` with the requests (an agent's own session
