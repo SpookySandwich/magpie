@@ -141,7 +141,7 @@ line; agents connected to magpie lose it when it quits.
 | OpenClaw     | `openclaw.json` in `~/.openclaw` (`$OPENCLAW_CONFIG_PATH`, `$OPENCLAW_STATE_DIR`, `~/.openclaw-<profile>` for `$OPENCLAW_PROFILE`, `~` as `$OPENCLAW_HOME`) | model (a `magpie` provider in `models.providers`, `openai-completions`, with magpie's models in it; `agents.defaults.model`'s primary set to it, what was there put back on Disconnect; `magpie/*` added to a `modelPolicy.allow` that would refuse it; the user's own keys in the provider and its models kept; a chat already on a model keeps it until `/model default`) |
 | jcode        | `config.toml` in `$JCODE_HOME`, else `~/.jcode` | model (a `[providers.magpie]` profile, `openai-compatible`, with magpie's models in it; `[provider] default_provider`/`default_model` set to it, what was there put back on Disconnect; the user's own keys in the profile, such as `headers` and a model's `reasoning_effort`, kept; restart open jcode sessions after connecting) |
 | Dim (alpha, `dima`) | Dim's built-in **Magpie** provider, through Dim's own daemon (`$DIMCODE_HOME`, else `~/.dimcode-alpha`), and magpie's own `dim.json` beside its settings | model (Dim's Magpie provider gets the gateway's `/v1` and magpie's key, is turned on and made Dim's model, so a plain `dima` runs on magpie; no other provider is touched, and a key or address you set on the Magpie entry yourself is kept. Picking Dim's own again turns the entry off and puts back the model Dim was on. When Dim's daemon can't be reached, a `dima` function in your shell profiles starts it with `DIM_BASE_URL`, `DIM_API_KEY`, `DIM_MODEL` and the token limits for that run instead) |
-| Mistral Vibe | `config.toml` in `$VIBE_HOME`, else `~/.vibe` | model (a `[[providers]]` entry named magpie with the gateway's `/v1` and the key as an `Authorization` header in `extra_headers`, since Vibe reads keys only from the environment; one `[[models]]` entry per model, aliased `magpie/<provider>/<model>`; `active_model` set to the alias, what was there put back on Disconnect; a `thinking` level the user set on a model kept; restart open vibe sessions after connecting) |
+| Mistral Vibe | `config.toml` in `$VIBE_HOME`, else `~/.vibe` | model (a `[[providers]]` entry named magpie with the gateway's `/v1` and the key as an `Authorization` header in `extra_headers`, since Vibe reads keys only from the environment; one `[[models]]` entry per model, aliased `magpie/<provider>/<model>`; `active_model` set to the alias, what was there put back on Disconnect; a `thinking` level the user set on a model kept; restart open vibe sessions after connecting). Vibe Desktop (bundle `ai.mistral.lechat.desktop`; `le-chat-desktop\Vibe.exe` on Windows) runs the same app server on the same file, lists the agent with no CLI installed, and reads the file when a chat starts |
 | MiniMax Code (mcode) | `~/.minimax/config.yaml` (`$MINIMAX_DATA_DIR`, or the folder the desktop app moved it to) | model (a `magpie` custom provider; magpie's models in its /model) |
 | Droid (Factory) | `~/.factory/settings.json` (`$FACTORY_HOME_OVERRIDE`) | model (magpie's models as BYOK `customModels`, in Droid's /model) |
 | Cline (CLI)  | `~/.cline/data/settings/providers.json` (`$CLINE_DIR`) | model, effort (magpie takes its openai-compatible provider) |
@@ -4719,11 +4719,14 @@ and models to look after first, by magpie's own ids only:
   fine-tune) is only `<provider>/other`; one on a provider of your own is
   only `custom`, a routing group only `group`;
 - how many of each, and how many routing groups you have.
-- for each partner (a sponsor listed first in the add sheet), by its id, how
-  many times a day the add sheet showed it, its row was opened, its key
-  page was opened and a provider was added from it (at most 20 of each,
-  5 adds), kept in `~/.cache/magpie/partner-counts.json` for at most 14
-  days and sent the day after as `magpie partner` events;
+- for each partner (a sponsor listed first in the add sheet, or in the
+  Plugins page's Discover), by its id, how many times a day it was shown,
+  its row was opened, its key page was opened and a provider was added
+  from it or its plugin installed (at most 20 of each, 5 adds), with where
+  it is listed (`slot`: `providers` or `plugins`), and how many times a
+  day the Plugins page was opened (at most 20), kept in
+  `~/.cache/magpie/partner-counts.json` for at most 14 days and sent the
+  day after as `magpie partner` and `magpie page` events;
 - to usemagpie.ai, not PostHog, which of the plugins Discover lists are
   installed and on (npm names, or `github:owner/repo` for a repository
   tagged `magpie-plugin`; never a folder, a private repository or an
@@ -4753,8 +4756,8 @@ Partners are also counted where usemagpie.ai sees them, whatever these
 settings say, as any website sees its visits. The partner list
 (`/api/partners`) gives each partner's website and key page as a
 `https://usemagpie.ai/go/<id>/site|keys[/<region>]` link, which sends a
-`magpie partner go` event (the partner, which link, the region, and the
-country Cloudflare gives) before sending the browser on; and one in ten
+`magpie partner go` event (the partner, which link, the region, where it
+is listed, and the country Cloudflare gives) before sending the browser on; and one in ten
 fetches of the list sends a `magpie partners fetch` event with weight 10
 and the country, while a partner is listed. Each event has an id of its
 own: no install id, address or account goes with it. The code is
