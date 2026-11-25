@@ -388,6 +388,16 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 	mux.HandleFunc("GET /api/library/native", func(rw http.ResponseWriter, r *http.Request) {
 		writeJSON(rw, library.ReadNative())
 	})
+	// A plugin's release pin and its repository's newer stable tags
+	// (#7549), asked for when its detail opens: git ls-remote, not polled.
+	mux.HandleFunc("GET /api/library/plugin-tags", func(rw http.ResponseWriter, r *http.Request) {
+		v, err := library.PluginTags(r.URL.Query().Get("name"))
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, v)
+	})
 	mux.HandleFunc("POST /api/library/pi", func(rw http.ResponseWriter, r *http.Request) {
 		var in struct {
 			Pi, Ext, Pkg string
@@ -663,6 +673,20 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 		mcpauth.Cancel(r.PathValue("id"))
 		rw.WriteHeader(http.StatusNoContent)
 	})
+	// a browser that couldn't reach magpie's callback (magpie on a server or
+	// in Docker) finishes the sign-in by pasting the address it ended on (@OoopsHh on X)
+	mux.HandleFunc("POST /api/library/mcp-signin/{id}/callback", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct{ URL string }
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.URL == "" {
+			http.Error(rw, "no address", http.StatusBadRequest)
+			return
+		}
+		if err := mcpauth.Submit(r.PathValue("id"), in.URL); err != nil {
+			fail(rw, err)
+			return
+		}
+		rw.WriteHeader(http.StatusNoContent)
+	})
 	// a server's accounts (Elorynth on X): Kind "signin" is magpie's OAuth
 	// sign-ins to it, "header" the sets of headers it is asked with; ID "" in
 	// a use is the server's own headers
@@ -786,6 +810,7 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			Keep     bool              // a project removed keeps what magpie put in it
 			On       bool              // every skill or server given to the agents, or taken from them
 			How      string            // link or copy: how skills are given to Agent, or to every agent with none (#896)
+			Tag      string            // the release tag a pinned plugin is upgraded to (plugins/upgrade, #7549)
 			// Replace updates a skill changed here all the same, its
 			// changed version kept with the backups (#1449)
 			Replace bool
@@ -893,6 +918,8 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			res, err = library.PluginOn(in.Name, in.On)
 		case "plugins/update":
 			res, err = library.UpdatePlugin(in.Name)
+		case "plugins/upgrade":
+			res, err = library.UpgradePlugin(in.Name, in.Tag)
 		case "plugins/remove":
 			res, err = library.RemovePlugin(in.Name)
 		case "subagents/save":
@@ -1035,6 +1062,8 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			res, err = library.ProjectSkillsOff(in.Dir, oneOrMore(in.Name, in.Names), in.Agents)
 		case "projects/copy":
 			res, err = library.ProjectCopy(in.Dir, in.Copy)
+		case "projects/main-only":
+			res, err = library.ProjectMainOnly(in.Dir, in.On)
 		case "projects/instructions":
 			// the text, the agents (sent as [] for none), or both
 			c := library.ProjectInstr{Text: in.Instr}
