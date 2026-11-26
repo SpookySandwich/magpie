@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/pii"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
@@ -60,6 +61,7 @@ func finishSignalGateway(s os.Signal) {
 	proc.EndProbes()
 	provider.FlushServed() // a gateway's last answers, noted and not yet written
 	gateway.FlushSticks()  // and who answered which conversation
+	pii.Flush()            // and what the privacy model found
 	// and the session index, or the next start reads every
 	// file a scan read since the last save again
 	savedWithin(sessionsSaved, saveOnSignal)

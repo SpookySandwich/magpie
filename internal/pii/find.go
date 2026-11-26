@@ -1,6 +1,7 @@
 package pii
 
 import (
+	"cmp"
 	"container/list"
 	"context"
 	"crypto/sha256"
@@ -561,7 +562,7 @@ func waitErr(ctx context.Context) error {
 func (b *backend) known(texts []string, got map[[32]byte][]redact.Found) (out [][]redact.Found, miss []int) {
 	out = make([][]redact.Found, len(texts))
 	b.cache.mu.Lock()
-	defer b.cache.mu.Unlock()
+	assembled := false
 	look := func(s string) ([]redact.Found, bool) {
 		k := sha256.Sum256([]byte(s))
 		if fs, ok := got[k]; ok {
@@ -600,6 +601,11 @@ func (b *backend) known(texts []string, got map[[32]byte][]redact.Found) (out []
 		}
 		out[i] = spread(t, merge(all))
 		b.cache.put(sha256.Sum256([]byte(t)), out[i])
+		assembled = true
+	}
+	b.cache.mu.Unlock()
+	if assembled {
+		b.saveSoon()
 	}
 	return out, miss
 }
@@ -904,6 +910,9 @@ type lru struct {
 	max int
 	ll  *list.List
 	m   map[[32]byte]*list.Element
+	// Dirty keys carry their last access order for oldest-first delta records.
+	dirty map[[32]byte]uint64
+	clock uint64
 }
 
 type entry struct {
@@ -919,19 +928,63 @@ func (c *lru) get(k [32]byte) ([]redact.Found, bool) {
 		return nil, false
 	}
 	c.ll.MoveToFront(e)
+	if _, changed := c.dirty[k]; changed {
+		c.markDirty(k)
+	}
 	return e.Value.(*entry).fs, true
 }
 
 func (c *lru) put(k [32]byte, fs []redact.Found) {
 	if e, ok := c.m[k]; ok {
 		c.ll.MoveToFront(e)
-		e.Value.(*entry).fs = fs
+		en := e.Value.(*entry)
+		_, dirty := c.dirty[k]
+		if dirty || !sameSpans(en.fs, fs) {
+			c.markDirty(k)
+		}
+		en.fs = fs
 		return
 	}
 	c.m[k] = c.ll.PushFront(&entry{k, fs})
+	c.markDirty(k)
 	for c.ll.Len() > c.max {
 		e := c.ll.Back()
 		c.ll.Remove(e)
 		delete(c.m, e.Value.(*entry).k)
+		delete(c.dirty, e.Value.(*entry).k)
+	}
+}
+
+func (c *lru) markDirty(k [32]byte) {
+	if c.dirty == nil {
+		c.dirty = make(map[[32]byte]uint64)
+	}
+	c.clock++
+	c.dirty[k] = c.clock
+}
+
+// takeDirty detaches a batch under c.mu. Concurrent puts start a new batch.
+func (c *lru) takeDirty() ([]entry, map[[32]byte]uint64) {
+	keys := c.dirty
+	c.dirty = nil
+	batch := make([]entry, 0, len(keys))
+	for k := range keys {
+		en := c.m[k].Value.(*entry)
+		batch = append(batch, entry{k, slices.Clone(en.fs)})
+	}
+	slices.SortFunc(batch, func(a, b entry) int { return cmp.Compare(keys[a.k], keys[b.k]) })
+	return batch, keys
+}
+
+func (c *lru) retry(keys map[[32]byte]uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.dirty == nil {
+		c.dirty = make(map[[32]byte]uint64)
+	}
+	for k, seq := range keys {
+		if c.m[k] != nil && c.dirty[k] == 0 {
+			c.dirty[k] = seq
+		}
 	}
 }

@@ -30,16 +30,11 @@ func guardSandbox(t *testing.T) string {
 		for deadline := time.Now().Add(30 * time.Second); (guardModel{}).Now().Downloading && time.Now().Before(deadline); {
 			time.Sleep(10 * time.Millisecond)
 		}
-		guardBackend.disk.mu.Lock()
-		if guardBackend.disk.timer != nil && guardBackend.disk.timer.Stop() {
-			guardBackend.disk.saves.Done()
-		}
-		guardBackend.disk.timer, guardBackend.disk.loaded = nil, ""
-		guardBackend.disk.mu.Unlock()
-		guardBackend.disk.saves.Wait()
+		stopTestSaves(guardBackend)
 		guardBackend.cache.mu.Lock()
 		guardBackend.cache.ll.Init()
 		clear(guardBackend.cache.m)
+		clear(guardBackend.cache.dirty)
 		guardBackend.cache.mu.Unlock()
 		gsrv.mu.Lock()
 		gsrv.failed, gsrv.loadMS = "", 0

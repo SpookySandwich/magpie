@@ -52,13 +52,7 @@ func newReader(t *testing.T, chunk int) *fakeReader {
 			return out, nil
 		}}
 	t.Cleanup(func() {
-		r.disk.mu.Lock()
-		if r.disk.timer != nil && r.disk.timer.Stop() {
-			r.disk.saves.Done()
-		}
-		r.disk.timer = nil
-		r.disk.mu.Unlock()
-		r.disk.saves.Wait()
+		stopTestSaves(r.backend)
 	})
 	return r
 }

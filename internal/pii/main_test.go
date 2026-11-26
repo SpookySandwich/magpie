@@ -206,14 +206,7 @@ func fakeInstallAt(t *testing.T, mode string, vulkan bool, d string) string {
 		turn <- struct{}{}
 		<-turn
 		upgrades.Wait()
-		disk.mu.Lock()
-		if disk.timer != nil && disk.timer.Stop() {
-			disk.saves.Done()
-		}
-		disk.timer = nil
-		disk.loaded = ""
-		disk.mu.Unlock()
-		disk.saves.Wait() // a write under way reads dir
+		stopTestSaves(pf)
 		srv.mu.Lock()
 		srv.cpu, srv.gpuLost, srv.failed = false, "", ""
 		srv.gpuFails, srv.gpuAgain = 0, time.Time{}
@@ -222,6 +215,7 @@ func fakeInstallAt(t *testing.T, mode string, vulkan bool, d string) string {
 		cache.mu.Lock()
 		cache.ll.Init()
 		clear(cache.m)
+		clear(cache.dirty)
 		cache.mu.Unlock()
 		dir, modelSize, idleAfter = was, wasSize, wasIdle
 	})

@@ -166,6 +166,7 @@ func restart(t *testing.T) {
 	cache.mu.Lock()
 	cache.ll.Init()
 	clear(cache.m)
+	clear(cache.dirty)
 	cache.mu.Unlock()
 	disk.mu.Lock()
 	disk.loaded = ""
@@ -177,14 +178,16 @@ func restart(t *testing.T) {
 // is kept on disk, by hash, without the text, and read back.
 func TestRestartReadsWhatWasFound(t *testing.T) {
 	log := fakeInstall(t, "ok", false)
-	saveAfter = 10 * time.Millisecond
-	t.Cleanup(func() { saveAfter = 2 * time.Second })
+	fastSaves(t, time.Hour)
 	history := []string{"hi Alice", "nothing here", "Bob, Alice and Alice"}
 	want, err := Find(history)
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, "the cache file", func() bool { _, err := os.Stat(cachePath()); return err == nil })
+	if _, err := os.Stat(cachePath()); !os.IsNotExist(err) {
+		t.Fatalf("cache before exit: %v, want no file", err)
+	}
+	Flush() // the same call as a graceful process exit
 	b, _ := os.ReadFile(cachePath())
 	for _, text := range history {
 		if strings.Contains(string(b), text) {
@@ -298,13 +301,7 @@ func TestStoppedRequestLeavesTheRestOfItsChunks(t *testing.T) {
 			return make([][]redact.Found, len(texts)), nil
 		}}
 	t.Cleanup(func() {
-		b.disk.mu.Lock()
-		if b.disk.timer != nil && b.disk.timer.Stop() {
-			b.disk.saves.Done() // the write that won't run now
-		}
-		b.disk.timer = nil
-		b.disk.mu.Unlock()
-		b.disk.saves.Wait()
+		stopTestSaves(b)
 	})
 	// three texts of a chunk each
 	texts := []string{strings.Repeat("a ", chunkSize/2-8), strings.Repeat("b ", chunkSize/2-8), strings.Repeat("c ", chunkSize/2-8)}
@@ -359,13 +356,7 @@ func TestStoppedRequestKeepsWhatWasRead(t *testing.T) {
 	t.Cleanup(func() {
 		close(release)
 		waitFor(t, "the turn free", func() bool { return len(b.turn) == 0 })
-		b.disk.mu.Lock()
-		if b.disk.timer != nil && b.disk.timer.Stop() {
-			b.disk.saves.Done()
-		}
-		b.disk.timer = nil
-		b.disk.mu.Unlock()
-		b.disk.saves.Wait()
+		stopTestSaves(b)
 	})
 	history := "user: ask Alice about the deploy"
 	if got, err := b.find(context.Background(), []string{history}); err != nil || len(got[0]) != 1 {

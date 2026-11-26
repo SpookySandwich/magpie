@@ -6,6 +6,7 @@ import (
 	"errors"
 	"hash/crc32"
 	"io"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -59,7 +60,7 @@ func cachePath() string { return filepath.Join(dir(), "found-"+modelSHA[:12]+".b
 
 // saveAfter is how long after an answer the file is written: one write
 // for a burst of requests.
-var saveAfter = 2 * time.Second
+var saveAfter = 30 * time.Second
 
 // compactLimit is how many appended entries may follow a snapshot before
 // flushCache rewrites the file whole.
@@ -84,7 +85,6 @@ type diskState struct {
 	size          int64
 	appended      int
 	appendedBytes int64
-	saved         map[[32]byte][]redact.Found
 }
 
 var disk diskState
@@ -107,10 +107,18 @@ func (bk *backend) loadCache() {
 		disk.mu.Unlock()
 		return
 	}
+	previous := disk.loaded
 	disk.loaded = p
 	disk.mu.Unlock()
+	if previous != "" && previous != p {
+		cache.mu.Lock()
+		for e := cache.ll.Back(); e != nil; e = e.Prev() {
+			cache.markDirty(e.Value.(*entry).k)
+		}
+		cache.mu.Unlock()
+	}
 
-	disk.file, disk.size, disk.appended, disk.appendedBytes, disk.saved = "", 0, 0, 0, nil
+	disk.file, disk.size, disk.appended, disk.appendedBytes = "", 0, 0, 0
 	b, err := os.ReadFile(p)
 	if err != nil {
 		return
@@ -121,18 +129,12 @@ func (bk *backend) loadCache() {
 	}
 	cache.mu.Lock()
 	for _, e := range es {
-		if _, ok := cache.m[e.k]; !ok {
+		if el := cache.m[e.k]; el == nil {
 			cache.put(e.k, e.fs)
+		} else if !sameSpans(el.Value.(*entry).fs, e.fs) {
+			continue // keep a newer in-memory answer dirty
 		}
-	}
-	var saved map[[32]byte][]redact.Found
-	if !rewrite {
-		saved = make(map[[32]byte][]redact.Found, min(len(es), cache.ll.Len()))
-		for _, e := range es {
-			if el, ok := cache.m[e.k]; ok && sameSpans(el.Value.(*entry).fs, e.fs) {
-				saved[e.k] = slices.Clone(e.fs)
-			}
-		}
+		delete(cache.dirty, e.k) // already on disk
 	}
 	cache.mu.Unlock()
 	if !rewrite {
@@ -140,72 +142,112 @@ func (bk *backend) loadCache() {
 		disk.size = int64(len(b))
 		disk.appended = appended
 		disk.appendedBytes = appendedBytes
-		disk.saved = saved
 	}
 }
 
-// saveSoon writes new answers saveAfter from now, unless a write is due.
+// A retired plugin model can still have an outstanding cache write.
+var pendingCaches sync.Map // *backend -> struct{}
+
+// Flush finishes the pending cache writes on shutdown or handover.
+func Flush() {
+	pendingCaches.Range(func(k, _ any) bool {
+		k.(*backend).flushNow()
+		return true
+	})
+}
+
 func (bk *backend) saveSoon() {
 	disk := bk.disk
 	disk.mu.Lock()
 	defer disk.mu.Unlock()
-	if disk.timer == nil {
-		disk.saves.Add(1)
-		disk.timer = time.AfterFunc(saveAfter, func() {
-			defer disk.saves.Done()
-			disk.mu.Lock()
-			disk.timer = nil
-			disk.mu.Unlock()
-			bk.flushCache()
-		})
+	if disk.timer != nil {
+		return
 	}
+	pendingCaches.Store(bk, struct{}{})
+	disk.saves.Add(1)
+	var timer *time.Timer
+	timer = time.AfterFunc(saveAfter, func() {
+		defer disk.saves.Done()
+		disk.saving.Lock()
+		defer disk.saving.Unlock()
+		disk.mu.Lock()
+		if disk.timer != timer {
+			disk.mu.Unlock()
+			return
+		}
+		disk.timer = nil
+		disk.mu.Unlock()
+		bk.writePending()
+	})
+	disk.timer = timer
+}
+
+// flushNow takes over the timer's batch, or waits for its write in progress.
+func (bk *backend) flushNow() {
+	disk := bk.disk
+	disk.saving.Lock()
+	defer disk.saving.Unlock()
+	disk.mu.Lock()
+	if disk.timer != nil {
+		if disk.timer.Stop() {
+			disk.saves.Done()
+		}
+		disk.timer = nil
+	}
+	disk.mu.Unlock()
+	bk.writePending()
+}
+
+// The caller holds saving. A timer armed during I/O owns the next batch.
+func (bk *backend) writePending() {
+	if err := bk.flushLocked(); err != nil {
+		log.Printf("privacy model: saving cached answers: %v", err)
+		return
+	}
+	bk.disk.mu.Lock()
+	if bk.disk.timer == nil {
+		pendingCaches.Delete(bk)
+	}
+	bk.disk.mu.Unlock()
 }
 
 // flushCache appends what changed since the last write to p, or rewrites
 // p whole when no appendable snapshot is on disk yet or the appended tail
 // has reached compactLimit.
 func (bk *backend) flushCache() error {
-	disk, cache := bk.disk, bk.cache
-	disk.saving.Lock()
-	defer disk.saving.Unlock()
+	bk.disk.saving.Lock()
+	defer bk.disk.saving.Unlock()
+	return bk.flushLocked()
+}
 
+func (bk *backend) flushLocked() (err error) {
+	disk, cache := bk.disk, bk.cache
+	cache.mu.Lock()
+	count := len(cache.dirty)
+	cache.mu.Unlock()
+	if count == 0 {
+		return nil
+	}
 	p := bk.path()
 	if disk.file != p {
 		return bk.saveCacheLocked(p)
 	}
-
 	cache.mu.Lock()
-	limit := compactLimit(cache.max)
-	cacheLen := cache.ll.Len()
-	hadSaved := len(disk.saved)
-	for k := range disk.saved {
-		if _, ok := cache.m[k]; !ok {
-			delete(disk.saved, k)
-		}
-	}
-	var dirty []entry
-	for e := cache.ll.Back(); e != nil; e = e.Prev() {
-		en := e.Value.(*entry)
-		if was, ok := disk.saved[en.k]; !ok || !sameSpans(was, en.fs) {
-			dirty = append(dirty, entry{k: en.k, fs: slices.Clone(en.fs)})
-		}
-	}
-	cache.mu.Unlock()
-
-	if len(dirty) == 0 {
-		if cacheLen == 0 && hadSaved > 0 {
-			return bk.saveCacheLocked(p)
-		}
-		return nil
-	}
-	if disk.appended+len(dirty) > limit {
+	if disk.appended+len(cache.dirty) > compactLimit(cache.max) {
+		cache.mu.Unlock()
 		return bk.saveCacheLocked(p)
 	}
-	rec := encodeDelta(dirty)
+	batch, keys := cache.takeDirty()
+	cache.mu.Unlock()
+	defer func() {
+		if err != nil {
+			cache.retry(keys)
+		}
+	}()
+	rec := encodeDelta(batch)
 	if disk.appendedBytes+int64(len(rec)) > maxDeltaBytes {
 		return bk.saveCacheLocked(p)
 	}
-
 	f, err := os.OpenFile(p, os.O_RDWR|os.O_APPEND, 0)
 	if err != nil {
 		return bk.saveCacheLocked(p)
@@ -220,15 +262,15 @@ func (bk *backend) flushCache() error {
 		err = cerr
 	}
 	if err != nil || n != len(rec) {
-		disk.file, disk.size, disk.appended, disk.appendedBytes, disk.saved = "", 0, 0, 0, nil
+		disk.file, disk.size, disk.appended, disk.appendedBytes = "", 0, 0, 0
+		if err == nil {
+			err = io.ErrShortWrite
+		}
 		return err
 	}
 	disk.size += int64(len(rec))
 	disk.appendedBytes += int64(len(rec))
-	disk.appended += len(dirty)
-	for _, d := range dirty {
-		disk.saved[d.k] = d.fs
-	}
+	disk.appended += len(batch)
 	return nil
 }
 
@@ -242,24 +284,18 @@ func (bk *backend) saveCache() error {
 	return bk.saveCacheLocked(bk.path())
 }
 
-func (bk *backend) saveCacheLocked(p string) error {
+func (bk *backend) saveCacheLocked(p string) (err error) {
 	disk, cache := bk.disk, bk.cache
-	disk.mu.Lock()
-	if disk.timer != nil && disk.timer.Stop() {
-		disk.timer = nil
-		disk.saves.Done()
-	}
-	disk.mu.Unlock()
-
 	cache.mu.Lock()
 	b := encodeCache(cache)
-	saved := make(map[[32]byte][]redact.Found, cache.ll.Len())
-	for e := cache.ll.Back(); e != nil; e = e.Prev() {
-		en := e.Value.(*entry)
-		saved[en.k] = slices.Clone(en.fs)
-	}
+	keys := cache.dirty
+	cache.dirty = nil
 	cache.mu.Unlock()
-
+	defer func() {
+		if err != nil {
+			cache.retry(keys)
+		}
+	}()
 	f, err := os.CreateTemp(filepath.Dir(p), "found-*.tmp")
 	if err != nil {
 		return err
@@ -282,7 +318,6 @@ func (bk *backend) saveCacheLocked(p string) error {
 	disk.size = int64(len(b))
 	disk.appended = 0
 	disk.appendedBytes = 0
-	disk.saved = saved
 	return nil
 }
 

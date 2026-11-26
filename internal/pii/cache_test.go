@@ -49,15 +49,23 @@ func newCacheBackend(t *testing.T, path string, cap int, asked *atomic.Int32) *b
 		},
 	}
 	t.Cleanup(func() {
-		b.disk.mu.Lock()
-		if b.disk.timer != nil && b.disk.timer.Stop() {
-			b.disk.saves.Done()
-		}
-		b.disk.timer = nil
-		b.disk.mu.Unlock()
-		b.disk.saves.Wait()
+		stopTestSaves(b)
 	})
 	return b
+}
+
+// stopTestSaves releases the test backend before its model directory goes away.
+func stopTestSaves(b *backend) {
+	d := b.disk
+	d.mu.Lock()
+	if d.timer != nil && d.timer.Stop() {
+		d.saves.Done()
+	}
+	d.timer = nil
+	d.loaded = ""
+	d.mu.Unlock()
+	d.saves.Wait()
+	pendingCaches.Delete(b)
 }
 
 func waitSaved(t *testing.T, b *backend) {

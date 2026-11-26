@@ -31,6 +31,7 @@ import (
 	"github.com/yetone/magpie/internal/library"
 	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/notices"
+	"github.com/yetone/magpie/internal/pii"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/pluginrt"
 	"github.com/yetone/magpie/internal/proc"
@@ -288,6 +289,7 @@ func Main(v string) {
 // models outlived the command that started it, its Chrome profiles held
 // (#7146).
 func exit(code int) {
+	pii.Flush() // what a command's privacy model found, not yet written
 	plugin.EndHosts()
 	endProcess(code)
 }

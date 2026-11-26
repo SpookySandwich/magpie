@@ -133,13 +133,7 @@ func TestOneTextReadOnceAtOnce(t *testing.T) {
 			return out, nil
 		}}
 	t.Cleanup(func() {
-		b.disk.mu.Lock()
-		if b.disk.timer != nil && b.disk.timer.Stop() {
-			b.disk.saves.Done()
-		}
-		b.disk.timer = nil
-		b.disk.mu.Unlock()
-		b.disk.saves.Wait()
+		stopTestSaves(b)
 	})
 	texts := []string{"the system prompt, call 13800138000"}
 	got := make(chan [][]redact.Found, 2)

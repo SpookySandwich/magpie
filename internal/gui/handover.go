@@ -14,6 +14,7 @@ import (
 
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/handoff"
+	"github.com/yetone/magpie/internal/pii"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/update"
 )
@@ -189,6 +190,9 @@ func (ho *handover) run() {
 	// the routing the new one goes on with: which account each
 	// conversation stuck to
 	gateway.FlushSticks()
+	// and what the privacy model found, which the new one reads at its
+	// first request rather than asking the model again
+	pii.Flush()
 	// the tool calls of this one's Claude Code runs, which their helper
 	// sends to the port the new one will serve, come back here
 	cbSock := filepath.Join(ho.offer.Dir(), "cb")
